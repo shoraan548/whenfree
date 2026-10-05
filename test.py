@@ -39,6 +39,17 @@ assert b('/api/state')[1]['me']['admin'] is False
 assert b('/api/activities', {'date': '2030-01-01', 'title': 'own' + S})[0] == 200, 'anyone can add an activity'
 own = next(x for x in b('/api/state')[1]['acts'] if x['title'] == 'own' + S)
 assert own['author'] == 'bob' + S and a('/api/state')[1]['acts'], 'everyone sees it, with its author'
+edit = {'date': '2030-01-02', 'time': '18:30', 'title': 'own2' + S, 'place': 'p', 'note': 'n'}
+assert b('/api/activities/' + own['id'], edit)[0] == 200, 'author can edit'
+got = next(x for x in b('/api/state')[1]['acts'] if x['id'] == own['id'])
+assert (got['date'], got['time'], got['title'], got['place']) == ('2030-01-02', '18:30', 'own2' + S, 'p')
+stranger = client()
+stranger('/api/register', {'name': 'str' + S, 'pass': 'secret1'})
+assert stranger('/api/activities/' + own['id'], edit)[0] == 403, "can't edit someone else's activity"
+assert b('/api/activities/' + own['id'], {**edit, 'date': '2030-02-30'})[0] == 400, 'invalid date'
+assert b('/api/activities/' + own['id'], {**edit, 'time': '25:00'})[0] == 400, 'invalid time'
+assert b('/api/activities', {**edit, 'date': '2030-13-01'})[0] == 400, 'invalid date on create too'
+if is_admin: assert a('/api/activities/' + own['id'], {**edit, 'title': 'adm' + S})[0] == 200, 'admin can edit any activity'
 assert b('/api/activities/' + own['id'], {}, 'DELETE')[0] == 200, 'author can delete their own'
 assert client()('/api/state')[0] == 401, 'not logged in'
 assert b('/api/login', {'name': 'bob' + S, 'pass': 'wrong11'})[0] == 401
@@ -199,4 +210,13 @@ m = re.search(r'через (\d+) мин', reminders(soon)[0])
 assert len(reminders(soon)) == 1 and m and 25 <= int(m[1]) <= 30, reminders(soon)
 assert len(reminders(later)) == 1 and 'через 5 ч' in reminders(later)[0], 'only the closest threshold, real time left'
 assert not reminders(far), 'nothing 30 h ahead'
+
+# moving an activity: people going are told, and reminders follow the new time
+far_act = next(x for x in t('/api/state')[1]['acts'] if x['title'] == far)
+l('/api/going/' + far_act['id'], {})
+soon_at = datetime.now(timezone.utc) + timedelta(minutes=40)
+t('/api/activities/' + far_act['id'], {**far_act, 'date': soon_at.date().isoformat(), 'time': soon_at.strftime('%H:%M')})
+assert wait(lambda: bot_said(222, 'Изменено') and bot_said(222, far)), 'people going are told about the change'
+assert not bot_said(111, 'Изменено'), 'the editor is not notified'
+assert wait(lambda: len(reminders(far)) == 1), 'reminder rescheduled to the new time'
 print('OK telegram')

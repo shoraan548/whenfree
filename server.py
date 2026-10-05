@@ -58,9 +58,28 @@ def tg(method, **params):
     with urllib.request.urlopen(req, timeout=70) as r: return json.load(r)['result']
 
 
-def notify(text, exclude=None):
-    """Send a Telegram message to every user with a linked Telegram, in the background."""
-    ids = [r['tg_id'] for r in rows('SELECT tg_id FROM users WHERE tg_id IS NOT NULL AND id IS NOT ?', exclude)]
+def activity_fields(b):
+    """Validated activity fields from a request body, or None."""
+    f = {'date': s(b.get('date'), 10), 'time': s(b.get('time'), 5), 'title': s(b.get('title'), 100),
+         'place': s(b.get('place'), 100), 'note': s(b.get('note'), 1000)}
+    try:
+        datetime.strptime(f['date'], '%Y-%m-%d')  # a real date: bad ones would break reminders
+        if f['time']: datetime.strptime(f['time'], '%H:%M')
+    except ValueError: return None
+    if not re.fullmatch(r'\d{4}-\d\d-\d\d', f['date']) or (f['time'] and not re.fullmatch(r'\d\d:\d\d', f['time'])): return None
+    return f if f['title'] else None
+
+
+def summary(f): return ' '.join(filter(None, [f"{f['date'][8:]}.{f['date'][5:7]}", f['time'], f['title']])) + (f" · {f['place']}" if f['place'] else '')
+
+
+def notify(text, exclude=None, going_of=None):
+    """Send a Telegram message in the background to users with Telegram linked (only those going, if going_of is set)."""
+    sql, args = 'SELECT tg_id FROM users WHERE tg_id IS NOT NULL AND id IS NOT ?', [exclude]
+    if going_of is not None:
+        sql += ' AND id IN (SELECT user_id FROM going WHERE activity_id = ?)'
+        args.append(going_of)
+    ids = [r['tg_id'] for r in rows(sql, *args)]
     if SITE_URL: text += '\n' + SITE_URL
     def run():
         for chat in ids:
@@ -237,25 +256,34 @@ def handle(method, path, b, u, res):
             q('INSERT INTO going VALUES (?, ?)', aid, u['id'])
         return 200, None
     if method == 'POST' and path == '/api/activities':
-        date, tm, title = s(b.get('date'), 10), s(b.get('time'), 5), s(b.get('title'), 100)
-        if not re.fullmatch(r'\d{4}-\d\d-\d\d', date) or not title or (tm and not re.fullmatch(r'\d\d:\d\d', tm)):
-            return 400, 'Нужны дата и название'
-        place = s(b.get('place'), 100)
+        f = activity_fields(b)
+        if not f: return 400, 'Нужны название и правильные дата и время'
         q('INSERT INTO activities(date, time, title, place, note, author_id) VALUES (?, ?, ?, ?, ?, ?)',
-          date, tm, title, place, s(b.get('note'), 1000), u['id'])
-        text = ' '.join(filter(None, ['Новое:', f'{date[8:]}.{date[5:7]}', tm, title])) + (f' · {place}' if place else '')
-        if one('SELECT COUNT(*) n FROM activities WHERE date = ?', date)['n'] > 1:
+          f['date'], f['time'], f['title'], f['place'], f['note'], u['id'])
+        text = 'Новое: ' + summary(f)
+        if one('SELECT COUNT(*) n FROM activities WHERE date = ?', f['date'])['n'] > 1:
             text += '\nНа этот день уже есть другие планы, голосуйте на сайте.'
         notify(text, exclude=u['id'])
         return 200, None
     m = re.fullmatch(r'/api/activities/(\d+)', path)
-    if method == 'DELETE' and m:
-        a = one('SELECT author_id FROM activities WHERE id = ?', int(m[1]))
+    if m and method in ('POST', 'DELETE'):  # POST = edit
+        aid = int(m[1])
+        a = one('SELECT * FROM activities WHERE id = ?', aid)
         if not a: return 404, 'Нет такой активности'
-        if not u['admin'] and a['author_id'] != u['id']: return 403, 'Удалить можно только свою активность'
-        for sql in ('DELETE FROM activities WHERE id = ?', 'DELETE FROM going WHERE activity_id = ?', 'DELETE FROM reminders WHERE activity_id = ?'):
-            q(sql, int(m[1]))
-        q('DELETE FROM votes WHERE choice = ?', m[1])
+        if not u['admin'] and a['author_id'] != u['id']: return 403, 'Изменить или удалить можно только свою активность'
+        if method == 'DELETE':
+            for sql in ('DELETE FROM activities WHERE id = ?', 'DELETE FROM going WHERE activity_id = ?', 'DELETE FROM reminders WHERE activity_id = ?'):
+                q(sql, aid)
+            q('DELETE FROM votes WHERE choice = ?', m[1])
+            return 200, None
+        f = activity_fields(b)
+        if not f: return 400, 'Нужны название и правильные дата и время'
+        q('UPDATE activities SET date = ?, time = ?, title = ?, place = ?, note = ? WHERE id = ?',
+          f['date'], f['time'], f['title'], f['place'], f['note'], aid)
+        if (f['date'], f['time']) != (a['date'], a['time']):
+            q('DELETE FROM reminders WHERE activity_id = ?', aid)  # reschedule reminders
+            if f['date'] != a['date']: q('DELETE FROM votes WHERE choice = ?', m[1])  # those votes were for the old day
+            notify('Изменено: ' + summary(f), exclude=u['id'], going_of=aid)
         return 200, None
     if not u['admin']: return 403, 'Только для админа'
     if method == 'POST' and path == '/api/notify':

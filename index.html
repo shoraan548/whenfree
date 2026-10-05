@@ -65,14 +65,33 @@ const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')
 const day = k => new Date(k + 'T00:00');
 const store = (k, v) => { try { return v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v); } catch {} };
 
-let st = null, last = null, sel = iso(new Date());
+// Time/date are plain text fields: native time pickers don't open in some mobile browsers (e.g. Telegram's).
+// Accepts 19:00, 1900, 19, 9.30 → "19:00"; '' → ''; garbage → null
+const normTime = v => {
+  const m = v.trim().match(/^(\d{1,2})(?:[:.,\s-]?(\d{2}))?$/);
+  if (!v.trim()) return '';
+  return m && +m[1] < 24 && +(m[2] || 0) < 60 ? `${m[1].padStart(2, '0')}:${m[2] || '00'}` : null;
+};
+// Accepts 5.10, 05.10.2026, 5/10/26, 2026-10-05 → "2026-10-05"; garbage → null
+const normDate = v => {
+  const isoM = v.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const [dd, mm, yy] = isoM ? [isoM[3], isoM[2], isoM[1]]
+    : v.trim().match(/^(\d{1,2})[.,/\s-](\d{1,2})(?:[.,/\s-](\d{2}|\d{4}))?$/)?.slice(1) ?? [];
+  if (!dd) return null;
+  const y = !yy ? new Date().getFullYear() : yy.length === 2 ? 2000 + +yy : +yy;
+  const d = new Date(y, mm - 1, +dd);
+  return d.getMonth() === mm - 1 && d.getDate() === +dd ? iso(d) : null;
+};
+const dmy = k => k.split('-').reverse().join('.');
+
+let st = null, last = null, sel = iso(new Date()), editing = null;
 const cfg = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
 let view = store('view') || (matchMedia('(max-width:600px)').matches ? 'week' : 'month');
 
 async function load() {
   const r = await fetch('/api/state');
   const t = r.ok ? await r.text() : '';
-  if (t === last || document.activeElement?.closest('form')) return; // don't clobber what the user is typing
+  if (t === last || editing || document.activeElement?.closest('form')) return; // don't clobber what the user is typing
   last = t; st = t ? JSON.parse(t) : null; render();
 }
 async function post(path, body, method = 'POST') {
@@ -155,16 +174,24 @@ function renderDay() {
   }
 
   h += list.map(a => {
-    const going = Object.values(a.going), inn = a.going[me.id];
+    if (editing === a.id) return `<form class="card" id="edit" data-id="${a.id}">
+      <input name="title" value="${esc(a.title)}" placeholder="Что" required class="w">
+      <input name="date" value="${dmy(a.date)}" placeholder="Дата: 25.12" required inputmode="decimal" autocomplete="off">
+      <input name="time" value="${esc(a.time)}" placeholder="Время: 19:00" inputmode="numeric" autocomplete="off">
+      <input name="place" value="${esc(a.place)}" placeholder="Где" class="w">
+      <textarea name="note" placeholder="Подробности" class="w">${esc(a.note)}</textarea>
+      <button class="p">Сохранить</button><button type="button" data-cancel="1">Отмена</button></form>`;
+    const going = Object.values(a.going), inn = a.going[me.id], mine = me.admin || a.author_id === me.id;
     return `<div class="card"><b>${esc(a.time)} ${esc(a.title)}</b> ${a.place ? '· ' + esc(a.place) : ''}
       <div class="mut">${esc(a.note)}</div>
       ${a.author ? `<div class="mut">Автор: ${esc(a.author)}</div>` : ''}
       <div>Идут (${going.length}): ${going.map(esc).join(', ') || '—'}</div>
       <div class="row"><button data-go="${a.id}" class="${inn ? '' : 'p'}">${inn ? 'Не пойду' : 'Я иду'}</button>
-      ${me.admin || a.author_id === me.id ? `<button data-del="${a.id}">Удалить</button>` : ''}</div></div>`;
+      ${mine ? `<button data-edit="${a.id}">Изменить</button><button data-del="${a.id}">Удалить</button>` : ''}</div></div>`;
   }).join('') || '<p class="mut">Ничего не запланировано.</p>';
 
-  h += `<form id="add"><input name="title" placeholder="Что" required class="w"><input name="time" type="time">
+  h += `<form id="add"><input name="title" placeholder="Что" required class="w">
+    <input name="time" placeholder="Время: 19:00" inputmode="numeric" autocomplete="off">
     <input name="place" placeholder="Где"><textarea name="note" placeholder="Подробности" class="w"></textarea>
     <button class="p w">Добавить на этот день</button></form>`;
   $('day').innerHTML = h;
@@ -200,21 +227,28 @@ $('prev').onclick = () => shift(-1);
 $('next').onclick = () => shift(1);
 $('grid').onclick = e => {
   const k = e.target.closest('.d')?.dataset.k; if (!k) return;
-  sel = k; render();
+  sel = k; editing = null; render();
   if (matchMedia('(max-width:600px)').matches) $('day').scrollIntoView({ behavior: 'smooth' });
 };
 $('day').onclick = e => {
   if (e.target.id === 'tglogin') return tgFlow($('tgbox'));
-  const { go, del } = e.target.dataset;
+  const { go, del, edit, cancel } = e.target.dataset;
   if (go) post('/api/going/' + go);
   if (del && confirm('Удалить активность?')) post('/api/activities/' + del, null, 'DELETE');
+  if (edit || cancel) { editing = edit || null; render(); }
 };
 $('day').onchange = e => { if (e.target.name === 'v') post('/api/vote', { date: sel, choice: e.target.value }); };
-$('day').onsubmit = e => {
+$('day').onsubmit = async e => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target));
-  if (e.target.id === 'login') post('/api/' + e.submitter.value, f);
-  else post('/api/activities', { ...f, date: sel });
+  if (e.target.id === 'login') return post('/api/' + e.submitter.value, f);
+  const time = normTime(f.time);
+  if (time === null) return alert('Время в формате 19:00');
+  if (e.target.id === 'add') return post('/api/activities', { ...f, time, date: sel });
+  const date = normDate(f.date);
+  if (!date) return alert('Дата в формате 25.12 или 25.12.2026');
+  if (await post('/api/activities/' + e.target.dataset.id, { ...f, time, date }) === null) return;
+  editing = null; sel = date; last = null; load(); // follow the activity if it moved to another day
 };
 $('dlg').onclick = async e => {
   const { adm, on, reset, name } = e.target.dataset;
