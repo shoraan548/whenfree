@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#3b6fe0">
+<title>Планы</title>
+<style>
+:root{--bg:#fff;--fg:#222;--mut:#888;--line:#ddd;--acc:#3b6fe0;--hi:#eef3ff;--warn:#e0913b}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--line:#333;--acc:#6f9bff;--hi:#1f2a44;--warn:#e0a060}}
+*{box-sizing:border-box}
+body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:960px;margin:auto;padding:16px}
+header{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+header>div{display:flex;gap:4px;flex-wrap:wrap}
+h2{margin:0}h2::first-letter,h3::first-letter{text-transform:uppercase}
+button{font:inherit;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);cursor:pointer}
+.btn{display:inline-block;padding:8px 12px;border:1px solid var(--line);border-radius:6px;text-decoration:none;color:var(--fg)}
+.p{background:var(--acc);color:#fff;border-color:var(--acc)}
+input,textarea{font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:100%}
+#grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px;margin:12px 0}
+.wd{text-align:center;color:var(--mut);font-size:12px}
+.d{min-height:76px;border:1px solid var(--line);border-radius:6px;padding:4px;cursor:pointer;overflow:hidden}
+.d.o{opacity:.35}.d.t{border-color:var(--acc)}.d.s{background:var(--hi)}
+.n{font-size:12px;color:var(--mut)}.t .n{color:var(--acc);font-weight:600}
+.chip{font-size:11px;background:var(--acc);color:#fff;border-radius:4px;padding:1px 4px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip.c{background:var(--warn)}
+.week .d{min-height:160px}.week .chip{white-space:normal;font-size:12px;padding:3px 5px}
+.card{border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0}
+.card .row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vote label{display:flex;gap:8px;align-items:center;padding:6px 0}.vote input{width:auto;margin:0}
+.mut{color:var(--mut);font-size:13px}
+form{display:grid;gap:6px;grid-template-columns:1fr 1fr}
+form .w{grid-column:1/-1}
+dialog{padding:0;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);width:min(420px,calc(100vw - 32px));max-height:calc(100dvh - 32px)}
+dialog::backdrop{background:#0006}
+.user{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}.user b{flex:1 1 120px;overflow-wrap:anywhere}
+dialog h3::first-letter{text-transform:none}
+@media(max-width:600px){
+  body{font-size:16px}main{padding:12px}
+  button{min-height:40px}
+  header h2{width:100%;font-size:20px}header>div{width:100%}#next{margin-right:auto}
+  .month .d{min-height:46px;padding:3px}.month .chip{font-size:0;height:6px;padding:0;margin-top:3px}
+  #grid.week{grid-template-columns:1fr;gap:4px}
+  .week .d{min-height:0;display:flex;flex-wrap:wrap;gap:4px;align-items:center;padding:8px}
+  .week .n{width:100%;font-size:14px}.week .chip{margin:0}
+  form{grid-template-columns:1fr}
+  .card .row button{flex:1}
+}
+</style>
+</head>
+<body><main>
+<header><h2 id="title"></h2><div>
+  <button id="prev" aria-label="Назад">‹</button><button id="today">Сегодня</button><button id="next" aria-label="Вперёд">›</button>
+  <button id="view"></button><button id="menu" hidden>☰</button>
+</div></header>
+<div id="grid"></div>
+<section id="day"></section>
+</main>
+<dialog id="dlg"></dialog>
+<script type="module">
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const day = k => new Date(k + 'T00:00');
+const store = (k, v) => { try { return v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v); } catch {} };
+
+let st = null, last = null, sel = iso(new Date());
+const cfg = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
+let view = store('view') || (matchMedia('(max-width:600px)').matches ? 'week' : 'month');
+
+async function load() {
+  const r = await fetch('/api/state');
+  const t = r.ok ? await r.text() : '';
+  if (t === last || document.activeElement?.closest('form')) return; // don't clobber what the user is typing
+  last = t; st = t ? JSON.parse(t) : null; render();
+}
+async function post(path, body, method = 'POST') {
+  document.activeElement?.blur();
+  const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const t = await r.text();
+  if (!r.ok) alert(t);
+  last = null; await load();
+  return r.ok ? t : null;
+}
+load(); setInterval(load, 5000); // ponytail: polls every 5s, switch to SSE if it gets slow
+
+// Telegram login/linking: get a one-time link, user confirms in the bot, we poll until it's done
+async function tgFlow(box, done) {
+  const r = await fetch('/api/tg/start', { method: 'POST' });
+  if (!r.ok) return alert(await r.text());
+  const { nonce, link } = await r.json();
+  box.innerHTML = `<a class="btn p" href="${esc(link)}" target="_blank" rel="noopener">Открыть Telegram</a>
+    <p class="mut">Нажмите в боте «Start», затем «Да, это я» и вернитесь сюда.</p>`;
+  let over = false;
+  const stop = () => { over = true; clearInterval(timer); document.removeEventListener('visibilitychange', check); };
+  const check = async () => {
+    if (over) return;
+    const c = await fetch('/api/tg/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonce }) });
+    if (c.status === 202 || over) return;
+    stop();
+    if (!c.ok) return box.textContent = await c.text();
+    last = null; await load(); done?.();
+  };
+  const timer = setInterval(check, 2000);
+  document.addEventListener('visibilitychange', check); // check right away when the user comes back from Telegram
+  setTimeout(stop, 10 * 60e3);
+}
+
+function render() {
+  const acts = st?.acts || [], me = st?.me, d0 = day(sel), month = view === 'month';
+  $('menu').hidden = !st;
+  $('view').textContent = month ? 'Неделя' : 'Месяц';
+  const start = month ? new Date(d0.getFullYear(), d0.getMonth(), 1) : new Date(d0);
+  const lead = (start.getDay() + 6) % 7; // weeks start on Monday
+  start.setDate(start.getDate() - lead);
+  const count = month ? Math.ceil((lead + new Date(d0.getFullYear(), d0.getMonth() + 1, 0).getDate()) / 7) * 7 : 7;
+  const end = new Date(start); end.setDate(start.getDate() + 6);
+  $('title').textContent = month ? d0.toLocaleDateString('ru', { month: 'long', year: 'numeric' })
+    : `${start.toLocaleDateString('ru', { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString('ru', { day: 'numeric', month: 'short' })}`;
+
+  let h = month ? ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(w => `<div class="wd">${w}</div>`).join('') : '';
+  for (let i = 0; i < count; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    const k = iso(d), list = acts.filter(a => a.date === k).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    const cls = [month && d.getMonth() !== d0.getMonth() && 'o', k === iso(new Date()) && 't', k === sel && 's'].filter(Boolean).join(' ');
+    const label = month ? d.getDate() : d.toLocaleDateString('ru', { weekday: 'short', day: 'numeric' });
+    h += `<div class="d ${cls}" data-k="${k}"><div class="n">${label}</div>` + list.map(a =>
+      `<div class="chip ${list.length > 1 ? 'c' : ''}">${me && a.going[me.id] ? '✓ ' : ''}${esc(a.time)} ${esc(a.title)}</div>`).join('') + '</div>';
+  }
+  $('grid').className = view;
+  $('grid').innerHTML = h;
+  renderDay();
+}
+
+function renderDay() {
+  if (!st) return $('day').innerHTML = `<form id="login"><input name="name" placeholder="Имя" required autocomplete="username" class="w">
+    <input name="pass" type="password" placeholder="Пароль" required autocomplete="current-password" class="w">
+    <button class="p" value="login">Войти</button><button value="register">Регистрация</button>
+    <p class="mut w">Забыли пароль — попросите админа сбросить.</p>
+    ${cfg.tg ? '<button type="button" class="w" id="tglogin">Войти через Telegram</button><div class="w" id="tgbox"></div>' : ''}</form>`;
+  const { me, acts, days } = st;
+  const list = acts.filter(a => a.date === sel).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  let h = `<h3>${day(sel).toLocaleDateString('ru', { weekday: 'long', day: 'numeric', month: 'long' })}</h3>`;
+
+  if (list.length > 1) {
+    const votes = Object.values(days[sel]?.votes || {});
+    const opts = [...list.map(a => [a.id, a.title]), ['all', list.length === 2 ? 'Обе (разделимся)' : 'Все (разделимся)']];
+    const n = id => votes.filter(v => v === id).length;
+    const max = Math.max(...opts.map(([id]) => n(id))), top = opts.filter(([id]) => n(id) === max);
+    const res = max === 0 ? 'голосов пока нет' : top.length > 1 ? 'пока ничья' : 'побеждает: ' + esc(top[0][1]);
+    const mine = days[sel]?.votes?.[me.id];
+    h += `<div class="card vote"><b>Пересечение — голосуем</b> <span class="mut">(${res})</span>` +
+      opts.map(([id, t]) => `<label><input type="radio" name="v" value="${id}" ${mine === id ? 'checked' : ''}> ${esc(t)} — ${n(id)}</label>`).join('') + '</div>';
+  }
+
+  h += list.map(a => {
+    const going = Object.values(a.going), inn = a.going[me.id];
+    return `<div class="card"><b>${esc(a.time)} ${esc(a.title)}</b> ${a.place ? '· ' + esc(a.place) : ''}
+      <div class="mut">${esc(a.note)}</div>
+      ${a.author ? `<div class="mut">Автор: ${esc(a.author)}</div>` : ''}
+      <div>Идут (${going.length}): ${going.map(esc).join(', ') || '—'}</div>
+      <div class="row"><button data-go="${a.id}" class="${inn ? '' : 'p'}">${inn ? 'Не пойду' : 'Я иду'}</button>
+      ${me.admin || a.author_id === me.id ? `<button data-del="${a.id}">Удалить</button>` : ''}</div></div>`;
+  }).join('') || '<p class="mut">Ничего не запланировано.</p>';
+
+  h += `<form id="add"><input name="title" placeholder="Что" required class="w"><input name="time" type="time">
+    <input name="place" placeholder="Где"><textarea name="note" placeholder="Подробности" class="w"></textarea>
+    <button class="p w">Добавить на этот день</button></form>`;
+  $('day').innerHTML = h;
+}
+
+function openMenu() {
+  if (!st) return $('dlg').close();
+  const { me, users } = st;
+  $("dlg").innerHTML = `<div style="padding:16px"><h3>${esc(me.name)}${me.admin ? ' <span class="mut">админ</span>' : ''}</h3>
+    <form id="pw">${me.pw ? '<input name="old" type="password" placeholder="Текущий пароль" required autocomplete="current-password" class="w">' : ''}
+      <input name="pass" type="password" placeholder="Новый пароль" required minlength="6" autocomplete="new-password" class="w">
+      <button class="w">${me.pw ? 'Сменить пароль' : 'Задать пароль (для входа без Telegram)'}</button></form>
+    ${!cfg.tg ? '' : me.tg ? '<p class="mut">Telegram привязан ✓ уведомления приходят туда.</p>'
+      : '<p><button id="tglink">Привязать Telegram для уведомлений</button></p><div id="tgbox2"></div>'}
+    ${me.admin && cfg.tg ? `<form id="notify"><textarea name="text" placeholder="Уведомление всем в Telegram" required class="w"></textarea>
+      <button class="w">Отправить всем</button></form>` : ''}
+    ${users ? '<h4>Люди</h4>' + users.map(u => `<div class="user"><b>${esc(u.name)}</b>${u.id === me.id ? '<span class="mut">это вы</span>' :
+      `<button data-adm="${u.id}" data-on="${u.admin ? '' : 1}">${u.admin ? 'Снять админа' : 'Сделать админом'}</button>
+       <button data-reset="${u.id}" data-name="${esc(u.name)}">Сброс пароля</button>`}</div>`).join('') : ''}
+    <div class="row" style="display:flex;gap:6px;margin-top:12px"><button id="logout">Выйти</button><button class="p" id="close" style="margin-left:auto">Закрыть</button></div></div>`;
+  if (!$('dlg').open) $('dlg').showModal();
+}
+
+$('menu').onclick = openMenu;
+$('view').onclick = () => { view = view === 'month' ? 'week' : 'month'; store('view', view); render(); };
+$('today').onclick = () => { sel = iso(new Date()); render(); };
+const shift = n => {
+  const d = day(sel);
+  if (view === 'month') d.setMonth(d.getMonth() + n, 1); else d.setDate(d.getDate() + 7 * n);
+  sel = iso(d); render();
+};
+$('prev').onclick = () => shift(-1);
+$('next').onclick = () => shift(1);
+$('grid').onclick = e => {
+  const k = e.target.closest('.d')?.dataset.k; if (!k) return;
+  sel = k; render();
+  if (matchMedia('(max-width:600px)').matches) $('day').scrollIntoView({ behavior: 'smooth' });
+};
+$('day').onclick = e => {
+  if (e.target.id === 'tglogin') return tgFlow($('tgbox'));
+  const { go, del } = e.target.dataset;
+  if (go) post('/api/going/' + go);
+  if (del && confirm('Удалить активность?')) post('/api/activities/' + del, null, 'DELETE');
+};
+$('day').onchange = e => { if (e.target.name === 'v') post('/api/vote', { date: sel, choice: e.target.value }); };
+$('day').onsubmit = e => {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  if (e.target.id === 'login') post('/api/' + e.submitter.value, f);
+  else post('/api/activities', { ...f, date: sel });
+};
+$('dlg').onclick = async e => {
+  const { adm, on, reset, name } = e.target.dataset;
+  if (e.target.id === 'close' || e.target === $('dlg')) $('dlg').close(); // clicking the backdrop closes it too
+  if (e.target.id === 'logout') { await post('/api/logout'); $('dlg').close(); }
+  if (e.target.id === 'tglink') tgFlow($('tgbox2'), openMenu);
+  if (adm) { await post(`/api/users/${adm}/admin`, { admin: !!on }); openMenu(); }
+  if (reset && confirm(`Сбросить пароль для ${name}?`)) {
+    const pass = await post(`/api/users/${reset}/reset`);
+    if (pass) alert(`Временный пароль для ${name}: ${pass}\nПередайте его, после входа пусть сменит в меню ☰.`);
+  }
+};
+$('dlg').onsubmit = async e => {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  if (e.target.id === 'notify') {
+    const n = await post('/api/notify', f);
+    if (n !== null) { alert(`Отправлено: ${n}`); openMenu(); }
+  } else if (await post('/api/password', f) !== null) { alert('Пароль сохранён'); openMenu(); }
+};
+</script>
+</body>
+</html>

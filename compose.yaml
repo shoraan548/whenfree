@@ -1,0 +1,48 @@
+# All settings come from .env (copy .env.example). Extras are enabled with COMPOSE_PROFILES.
+name: plany
+
+services:
+  app:
+    build: .
+    environment:
+      DB: /data/app.db
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      SITE_URL: ${SITE_URL:-}
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - data:/data
+    ports:
+      - "${HTTP_PORT:-8090}:8080"
+    restart: unless-stopped
+
+  # profile "tailscale": free public link https://<TS_HOSTNAME>.<tailnet>.ts.net via Tailscale Funnel
+  tailscale:
+    profiles: [tailscale]
+    image: tailscale/tailscale
+    hostname: ${TS_HOSTNAME:-plany}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - ts-state:/var/lib/tailscale
+      - ./ts-serve.json:/config/serve.json:ro
+    restart: unless-stopped
+
+  # profile "domain": your own domain with automatic HTTPS (Let's Encrypt)
+  caddy:
+    profiles: [domain]
+    image: caddy:2-alpine
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to app:8080
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+    restart: unless-stopped
+
+volumes:
+  data:
+  ts-state:
+  caddy-data:
