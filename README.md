@@ -107,3 +107,7 @@ docker compose cp ./backup.db app:/data/app.db && docker compose restart app   #
 ```bash
 docker build -t plany-test . && docker run --rm -e DB=/tmp/t.db -e BOT_TOKEN=test -e TG_API=http://127.0.0.1:8099 -e TZ=UTC -e REMIND_EVERY=1 -v "$PWD/test.py:/app/test.py:ro" plany-test sh -c 'python server.py & python test.py'
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
