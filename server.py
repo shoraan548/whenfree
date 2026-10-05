@@ -13,6 +13,7 @@ db.executescript('''
   CREATE TABLE IF NOT EXISTS going(activity_id INTEGER, user_id INTEGER, PRIMARY KEY(activity_id, user_id));
   CREATE TABLE IF NOT EXISTS votes(date TEXT, user_id INTEGER, choice TEXT NOT NULL, PRIMARY KEY(date, user_id));
   CREATE TABLE IF NOT EXISTS reminders(activity_id INTEGER, user_id INTEGER, hours INTEGER, PRIMARY KEY(activity_id, user_id, hours));
+  CREATE TABLE IF NOT EXISTS outbox(chat_id INTEGER, activity_id INTEGER, kind TEXT, text TEXT);  -- held during quiet hours
 ''')
 # migrations for existing DBs
 if 'tg_id' not in [c[1] for c in db.execute('PRAGMA table_info(users)')]:
@@ -35,6 +36,14 @@ TG_TTL = 10 * 60
 TZ = ZoneInfo(os.environ.get('TZ') or 'Europe/Moscow')  # activity times are in this timezone
 REMIND_HOURS = (24, 6, 1)
 REMIND_EVERY = float(os.environ.get('REMIND_EVERY', 60))  # seconds between checks; tests make it short
+_quiet = os.environ.get('QUIET_HOURS', '0-7')
+QUIET = tuple(map(int, _quiet.split('-'))) if _quiet else None  # no messages in these hours, e.g. 0-7 or 23-8; empty = off
+
+
+def quiet(now):
+    if not QUIET: return False
+    start, end = QUIET
+    return start <= now.hour < end if start <= end else now.hour >= start or now.hour < end
 
 
 def q(sql, *args): return db.execute(sql, args)
@@ -73,21 +82,54 @@ def activity_fields(b):
 def summary(f): return ' '.join(filter(None, [f"{f['date'][8:]}.{f['date'][5:7]}", f['time'], f['title']])) + (f" · {f['place']}" if f['place'] else '')
 
 
-def notify(text, exclude=None, going_of=None):
-    """Send a Telegram message in the background to users with Telegram linked (only those going, if going_of is set)."""
+def start_of(a): return datetime.fromisoformat(f"{a['date']}T{a['time'] or '09:00'}").replace(tzinfo=TZ)  # no time given = 09:00
+
+
+def activity_text(a, kind):
+    text = ('Новое: ' if kind == 'new' else 'Изменено: ') + summary(a)
+    if kind == 'new' and one('SELECT COUNT(*) n FROM activities WHERE date = ?', a['date'])['n'] > 1:
+        text += '\nНа этот день уже есть другие планы, голосуйте на сайте.'
+    return text
+
+
+def send_all(msgs):
+    """Send (chat_id, text) pairs one by one."""
+    for chat, text in msgs:
+        try: tg('sendMessage', chat_id=chat, text=text + ('\n' + SITE_URL if SITE_URL else ''))
+        except Exception as e: print('telegram send failed:', e, flush=True)  # e.g. the user blocked the bot
+        time.sleep(0.05)  # stay well under Telegram's 30 msg/s
+
+
+def notify(text, exclude=None, going_of=None, activity_id=None, kind=None):
+    """Message users with Telegram linked (only those going, if going_of is set): in the background now,
+    or queued until morning during quiet hours. activity_id + kind ('new'/'edit') let the queue merge them."""
     sql, args = 'SELECT tg_id FROM users WHERE tg_id IS NOT NULL AND id IS NOT ?', [exclude]
     if going_of is not None:
         sql += ' AND id IN (SELECT user_id FROM going WHERE activity_id = ?)'
         args.append(going_of)
     ids = [r['tg_id'] for r in rows(sql, *args)]
-    if SITE_URL: text += '\n' + SITE_URL
-    def run():
-        for chat in ids:
-            try: tg('sendMessage', chat_id=chat, text=text)
-            except Exception as e: print('telegram send failed:', e, flush=True)  # e.g. the user blocked the bot
-            time.sleep(0.05)  # stay well under Telegram's 30 msg/s
-    if BOT_TOKEN and ids: threading.Thread(target=run, daemon=True).start()
+    if not BOT_TOKEN or not ids: return len(ids)
+    if quiet(datetime.now(TZ)):
+        for chat in ids: q('INSERT INTO outbox VALUES (?, ?, ?, ?)', chat, activity_id, kind, text)
+    else:
+        threading.Thread(target=send_all, args=([(chat, text) for chat in ids],), daemon=True).start()
     return len(ids)
+
+
+def take_outbox(now):
+    """Under the lock: messages held overnight, one per person and activity, rebuilt from the activity's
+    current state ('new' wins over 'edit'). Activities deleted or already over by now are dropped."""
+    out, merged = [], {}
+    for r in rows('SELECT * FROM outbox ORDER BY rowid'):
+        if r['activity_id'] is None: out.append((r['chat_id'], r['text']))  # e.g. an admin broadcast
+        else:
+            key = (r['chat_id'], r['activity_id'])
+            merged[key] = 'new' if 'new' in (merged.get(key), r['kind']) else 'edit'
+    for (chat, aid), kind in merged.items():
+        a = one('SELECT * FROM activities WHERE id = ?', aid)
+        if a and start_of(a) > now: out.append((chat, activity_text(a, kind)))
+    q('DELETE FROM outbox')
+    return out
 
 
 def tg_confirm(p, who):
@@ -135,7 +177,7 @@ def due_reminders(now):
     threshold is sent, so a late check or a last-minute activity doesn't produce stale "in 24 h" messages."""
     out = []
     for a in rows('SELECT * FROM activities WHERE date BETWEEN ? AND ?', now.date().isoformat(), (now + timedelta(days=2)).date().isoformat()):
-        start = datetime.fromisoformat(f"{a['date']}T{a['time'] or '09:00'}").replace(tzinfo=TZ)  # no time given = 09:00
+        start = start_of(a)
         due = [h for h in REMIND_HOURS if start - timedelta(hours=h) <= now]
         if start <= now or not due: continue
         mins = round((start - now).total_seconds() / 60)
@@ -147,14 +189,21 @@ def due_reminders(now):
     return out
 
 
+def tick(now):
+    """Under the lock: everything to send at this moment. Nothing during quiet hours; at the end of them the
+    night's queue goes out, and reminders skipped overnight collapse into the closest one (see due_reminders)."""
+    if quiet(now): return []
+    msgs = take_outbox(now)
+    for a, left, chat in due_reminders(now):
+        msgs.append((chat, f"Напоминание: через {left} {a['title']}" + (f" · {a['place']}" if a['place'] else '')))
+    return msgs
+
+
 def reminder_loop():
     while True:
         try:
-            with lock: due = due_reminders(datetime.now(TZ))
-            for a, left, chat in due:
-                text = f"Напоминание: через {left} {a['title']}" + (f" · {a['place']}" if a['place'] else '') + (f'\n{SITE_URL}' if SITE_URL else '')
-                try: tg('sendMessage', chat_id=chat, text=text)
-                except Exception as e: print('telegram send failed:', e, flush=True)
+            with lock: msgs = tick(datetime.now(TZ))
+            send_all(msgs)
         except Exception as e:
             print('reminders:', repr(e), flush=True)
         time.sleep(REMIND_EVERY)
@@ -258,12 +307,9 @@ def handle(method, path, b, u, res):
     if method == 'POST' and path == '/api/activities':
         f = activity_fields(b)
         if not f: return 400, 'Нужны название и правильные дата и время'
-        q('INSERT INTO activities(date, time, title, place, note, author_id) VALUES (?, ?, ?, ?, ?, ?)',
-          f['date'], f['time'], f['title'], f['place'], f['note'], u['id'])
-        text = 'Новое: ' + summary(f)
-        if one('SELECT COUNT(*) n FROM activities WHERE date = ?', f['date'])['n'] > 1:
-            text += '\nНа этот день уже есть другие планы, голосуйте на сайте.'
-        notify(text, exclude=u['id'])
+        aid = q('INSERT INTO activities(date, time, title, place, note, author_id) VALUES (?, ?, ?, ?, ?, ?)',
+                f['date'], f['time'], f['title'], f['place'], f['note'], u['id']).lastrowid
+        notify(activity_text(f, 'new'), exclude=u['id'], activity_id=aid, kind='new')
         return 200, None
     m = re.fullmatch(r'/api/activities/(\d+)', path)
     if m and method in ('POST', 'DELETE'):  # POST = edit
@@ -283,7 +329,7 @@ def handle(method, path, b, u, res):
         if (f['date'], f['time']) != (a['date'], a['time']):
             q('DELETE FROM reminders WHERE activity_id = ?', aid)  # reschedule reminders
             if f['date'] != a['date']: q('DELETE FROM votes WHERE choice = ?', m[1])  # those votes were for the old day
-            notify('Изменено: ' + summary(f), exclude=u['id'], going_of=aid)
+            notify(activity_text(f, 'edit'), exclude=u['id'], going_of=aid, activity_id=aid, kind='edit')
         return 200, None
     if not u['admin']: return 403, 'Только для админа'
     if method == 'POST' and path == '/api/notify':

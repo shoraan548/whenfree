@@ -9,6 +9,7 @@ services:
       BOT_TOKEN: ${BOT_TOKEN:-}
       SITE_URL: ${SITE_URL:-}
       TZ: ${TZ:-Europe/Moscow}
+      QUIET_HOURS: ${QUIET_HOURS-0-7}
     volumes:
       - data:/data
     ports:

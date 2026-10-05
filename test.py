@@ -1,7 +1,8 @@
 # Smoke test against a running server: python test.py [url]. Random suffix, so it works on a non-empty DB too.
 # Telegram checks run when the server was started with
-#   BOT_TOKEN=test TG_API=http://127.0.0.1:8099 TZ=UTC REMIND_EVERY=1   (fake Bot API below, fast reminder checks)
-import json, random, re, string, sys, threading, time, urllib.error, urllib.request
+#   BOT_TOKEN=test TG_API=http://127.0.0.1:8099 TZ=UTC REMIND_EVERY=1 QUIET_HOURS=   (fake Bot API below, fast reminder checks)
+# Quiet hours are checked in-process against server.py with a fixed clock, so this file must sit next to server.py.
+import json, os, random, re, string, sys, threading, time, urllib.error, urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -110,6 +111,50 @@ c('/api/register', {'name': victim, 'pass': 'secret1'})
 for i in range(10): c('/api/login', {'name': victim, 'pass': f'wrong{i}'})
 assert c('/api/login', {'name': victim, 'pass': 'secret1'})[0] == 429, 'blocked even with the right password'
 print('OK lockout')
+
+# Quiet hours, in-process: server.py's functions on an in-memory DB with a fixed clock
+os.environ['DB'] = ':memory:'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import server as srv
+srv.TZ, srv.BOT_TOKEN = timezone.utc, 'x'
+def at(day, h, m=0): return datetime(2031, 3, day, h, m, tzinfo=timezone.utc)
+def first_lines(msgs): return sorted((chat, text.split('\n')[0]) for chat, text in msgs)
+
+srv.QUIET = (0, 7)
+assert srv.quiet(at(10, 0)) and srv.quiet(at(10, 6, 59)) and not srv.quiet(at(10, 7)) and not srv.quiet(at(10, 23, 59))
+srv.QUIET = (23, 8)  # wrapping past midnight
+assert srv.quiet(at(10, 23)) and srv.quiet(at(10, 3)) and not srv.quiet(at(10, 8)) and not srv.quiet(at(10, 22))
+
+# an 08:00 activity: 24 h reminder the day before, nothing at night, at 07:00 only the 1 h one (no 6 h one)
+srv.QUIET = (0, 7)
+u1 = srv.q("INSERT INTO users(name, hash, tg_id) VALUES ('u1', '', 555)").lastrowid
+srv.q("INSERT INTO users(name, hash, tg_id) VALUES ('u2', '', 556)")
+ev = srv.q("INSERT INTO activities(date, time, title) VALUES ('2031-03-10', '08:00', 'Morning')").lastrowid
+srv.q('INSERT INTO going VALUES (?, ?)', ev, u1)
+log = []
+for day, h in [(9, 9), (9, 20), (10, 0), (10, 2), (10, 3), (10, 6)]: log += srv.tick(at(day, h))
+assert first_lines(log) == [(555, 'Напоминание: через 23 ч Morning')], log
+assert srv.tick(at(10, 7)) == [(555, 'Напоминание: через 60 мин Morning')], 'only the closest reminder in the morning'
+assert srv.tick(at(10, 7, 30)) == [], 'no duplicates'
+
+# notifications made at night are held until morning, merged, and rebuilt from the current state
+srv.QUIET = (0, 24)  # "night" while we create things (notify() reads the real clock)
+def act(title, tm):
+    aid = srv.q("INSERT INTO activities(date, time, title) VALUES ('2031-03-10', ?, ?)", tm, title).lastrowid
+    srv.notify(srv.activity_text(srv.one('SELECT * FROM activities WHERE id = ?', aid), 'new'), activity_id=aid, kind='new')
+    return aid
+lunch = act('Lunch', '12:00')
+srv.q("UPDATE activities SET title = 'Lunch moved' WHERE id = ?", lunch)
+srv.notify('edited', activity_id=lunch, kind='edit')
+srv.q('DELETE FROM activities WHERE id = ?', act('Cancelled', '13:00'))
+act('Too early', '05:00')
+srv.notify('admin: hello')
+assert srv.tick(at(10, 3)) == [], 'nothing goes out at night'
+srv.QUIET = (0, 7)
+assert first_lines(srv.tick(at(10, 7))) == sorted([(555, 'admin: hello'), (556, 'admin: hello'),
+    (555, 'Новое: 10.03 12:00 Lunch moved'), (556, 'Новое: 10.03 12:00 Lunch moved')]), 'one message per activity, current state'
+assert srv.tick(at(10, 8)) == [] and not srv.rows('SELECT * FROM outbox'), 'queue is emptied'
+print('OK quiet hours')
 
 # Telegram: fake Bot API that queues updates for the server and records what the bot sends
 updates, sent = [], []

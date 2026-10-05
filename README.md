@@ -33,6 +33,7 @@ Everything is set in `.env`; [.env.example](.env.example) has every option with 
 | `COMPOSE_PROFILES` | Extras to run: `tailscale`, `domain` (comma-separated) | none: app only |
 | `HTTP_PORT` | Port the app listens on. Use `127.0.0.1:8090` on a public server | `8090` |
 | `TZ` | Timezone of activity times, used for reminders | `Europe/Moscow` |
+| `QUIET_HOURS` | No Telegram messages in these hours, e.g. `0-7` or `23-8`; empty = off | `0-7` |
 | `BOT_TOKEN` | Telegram bot token, turns on Telegram login, notifications and reminders | off |
 | `SITE_URL` | Public address, added as a link to Telegram messages | none |
 | `DOMAIN` | Your domain (profile `domain`) | — |
@@ -84,6 +85,7 @@ How it works:
 - **Linking:** existing users link Telegram in the ☰ menu.
 - **Notifications:** when someone adds an activity, everyone else with Telegram linked gets a message (with a nudge to vote if the day already has plans). Admins can message everyone from the ☰ menu.
 - **Reminders:** 24 h, 6 h and 1 h before an activity, to everyone who tapped "Я иду". If one was missed (server down, or the person joined late), only the closest is sent, with the real time left. An activity without a time counts as 09:00, in the `TZ` timezone.
+- **Quiet hours** (`QUIET_HOURS`, 00:00–07:00 by default): nothing is sent at night. In the morning the held messages go out without duplicates: one per person and activity, with its current details (created and then edited at night = one "new" message; created and deleted = nothing). Reminders missed overnight collapse into the closest one: for an 08:00 activity you get only "in 1 h" at 07:00, not the 6 h one.
 - The bot polls Telegram itself (no webhook), so it works behind NAT and on localhost.
 - Users without Telegram use the app as before, just without notifications.
 
@@ -105,7 +107,7 @@ docker compose cp ./backup.db app:/data/app.db && docker compose restart app   #
 - Tests run in a container with a temporary DB; Telegram is checked against a fake Bot API built into [test.py](test.py):
 
 ```bash
-docker build -t whenfree-test . && docker run --rm -e DB=/tmp/t.db -e BOT_TOKEN=test -e TG_API=http://127.0.0.1:8099 -e TZ=UTC -e REMIND_EVERY=1 -v "$PWD/test.py:/app/test.py:ro" whenfree-test sh -c 'python server.py & python test.py'
+docker build -t whenfree-test . && docker run --rm -e DB=/tmp/t.db -e BOT_TOKEN=test -e TG_API=http://127.0.0.1:8099 -e TZ=UTC -e REMIND_EVERY=1 -e QUIET_HOURS= -v "$PWD/test.py:/app/test.py:ro" whenfree-test sh -c 'python server.py & python test.py'
 ```
 
 ## License
