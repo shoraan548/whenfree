@@ -98,7 +98,7 @@ def on_update(upd):
         if not p or time.time() - p['at'] > TG_TTL:
             return tg('sendMessage', chat_id=chat, text='Чтобы войти, нажмите «Войти через Telegram» на сайте.')
         # Explicit confirmation, so a link someone else sent you can't silently log them in as you
-        tg('sendMessage', chat_id=chat, text='Войти на сайт «Планы»? Нажимайте, только если вы сами сейчас входите.',
+        tg('sendMessage', chat_id=chat, text='Войти на сайт «WhenFree»? Нажимайте, только если вы сами сейчас входите.',
            reply_markup={'inline_keyboard': [[{'text': 'Да, это я', 'callback_data': 'ok:' + nonce}]]})
     elif cq := upd.get('callback_query'):
         nonce = (cq.get('data') or '')[3:]

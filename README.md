@@ -1,4 +1,4 @@
-# Plany — plans with friends
+# WhenFree — plans with friends
 
 A small self-hosted calendar for planning activities with friends:
 
@@ -15,7 +15,7 @@ Python 3 (standard library only) + SQLite in one small container. The UI is in R
 You need Docker with the Compose plugin.
 
 ```bash
-git clone <this repo> plany && cd plany
+git clone <this repo> whenfree && cd whenfree
 cp .env.example .env    # then edit .env, see below
 docker compose up -d --build
 ```
@@ -36,7 +36,7 @@ Everything is set in `.env`; [.env.example](.env.example) has every option with 
 | `BOT_TOKEN` | Telegram bot token, turns on Telegram login, notifications and reminders | off |
 | `SITE_URL` | Public address, added as a link to Telegram messages | none |
 | `DOMAIN` | Your domain (profile `domain`) | — |
-| `TS_AUTHKEY`, `TS_HOSTNAME` | Tailscale key and link name (profile `tailscale`) | —, `plany` |
+| `TS_AUTHKEY`, `TS_HOSTNAME` | Tailscale key and link name (profile `tailscale`) | —, `whenfree` |
 
 After changing `.env`, run `docker compose up -d --build` again.
 
@@ -51,8 +51,8 @@ Pick one. Without either, the app is available on your local network only.
 3. In `.env`:
    ```
    COMPOSE_PROFILES=domain
-   DOMAIN=plans.example.com
-   SITE_URL=https://plans.example.com
+   DOMAIN=whenfree.example.com
+   SITE_URL=https://whenfree.example.com
    HTTP_PORT=127.0.0.1:8090
    ```
 4. `docker compose up -d --build`. [Caddy](https://caddyserver.com) gets and renews a free Let's Encrypt certificate automatically.
@@ -89,7 +89,7 @@ How it works:
 
 ## Data and backups
 
-The database is a single SQLite file in the docker volume `plany_data`.
+The database is a single SQLite file in the docker volume `whenfree_data`.
 
 ```bash
 docker compose cp app:/data/app.db ./backup.db     # backup
@@ -105,7 +105,7 @@ docker compose cp ./backup.db app:/data/app.db && docker compose restart app   #
 - Tests run in a container with a temporary DB; Telegram is checked against a fake Bot API built into [test.py](test.py):
 
 ```bash
-docker build -t plany-test . && docker run --rm -e DB=/tmp/t.db -e BOT_TOKEN=test -e TG_API=http://127.0.0.1:8099 -e TZ=UTC -e REMIND_EVERY=1 -v "$PWD/test.py:/app/test.py:ro" plany-test sh -c 'python server.py & python test.py'
+docker build -t whenfree-test . && docker run --rm -e DB=/tmp/t.db -e BOT_TOKEN=test -e TG_API=http://127.0.0.1:8099 -e TZ=UTC -e REMIND_EVERY=1 -v "$PWD/test.py:/app/test.py:ro" whenfree-test sh -c 'python server.py & python test.py'
 ```
 
 ## License

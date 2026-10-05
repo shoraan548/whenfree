@@ -1,5 +1,5 @@
 # All settings come from .env (copy .env.example). Extras are enabled with COMPOSE_PROFILES.
-name: plany
+name: whenfree
 
 services:
   app:
@@ -19,7 +19,7 @@ services:
   tailscale:
     profiles: [tailscale]
     image: tailscale/tailscale
-    hostname: ${TS_HOSTNAME:-plany}
+    hostname: ${TS_HOSTNAME:-whenfree}
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_STATE_DIR: /var/lib/tailscale
